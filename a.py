@@ -1,0 +1,125 @@
+import streamlit as st
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+from transformers import pipeline
+
+# Initialize pipelines (this may take a moment on first run)
+@st.cache_resource(show_spinner=False)
+def load_summarizer():
+    return pipeline("summarization")
+
+@st.cache_resource(show_spinner=False)
+def load_sentiment():
+    return pipeline("sentiment-analysis")
+
+summarizer = load_summarizer()
+sentiment_analyzer = load_sentiment()
+
+# Function to extract article text from a URL using requests & BeautifulSoup
+def extract_article_text(url):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None
+        soup = BeautifulSoup(response.text, "html.parser")
+        # BBC articles often have paragraphs inside <p> tags.
+        paragraphs = soup.find_all("p")
+        text = " ".join([p.get_text() for p in paragraphs])
+        return text.strip()
+    except Exception as e:
+        st.error(f"Error fetching article: {e}")
+        return None
+
+# Function to generate summary given an article text.
+def generate_summary(text):
+    # The summarization pipeline has limits on input size so we truncate if necessary.
+    max_input = 1024
+    if len(text.split()) > max_input:
+        text = " ".join(text.split()[:max_input])
+    try:
+        summary_list = summarizer(text, max_length=130, min_length=30, do_sample=False)
+        return summary_list[0]['summary_text']
+    except Exception as e:
+        st.error(f"Error in summarization: {e}")
+        return "Summary generation failed."
+
+# Function to analyze sentiment and compute an "importance score"
+def analyze_sentiment(text):
+    try:
+        sentiment = sentiment_analyzer(text[:512])[0]  # limit text length for performance
+        label = sentiment['label']
+        score = sentiment['score']
+        # Define importance score: positive sentiment gives +score*100, negative gives -score*100.
+        importance_score = score * 100 if label.upper() == "POSITIVE" else -score * 100
+        return label, round(importance_score, 2)
+    except Exception as e:
+        st.error(f"Error in sentiment analysis: {e}")
+        return "N/A", 0
+
+# Function that runs full analysis on a given URL
+def analyze_article(url):
+    article_text = extract_article_text(url)
+    if not article_text or len(article_text) < 100:
+        return None, None, None
+    summary = generate_summary(article_text)
+    sentiment_label, importance_score = analyze_sentiment(article_text)
+    return summary, sentiment_label, importance_score
+
+# List of preloaded BBC article URLs (update these URLs with valid ones)
+preloaded_articles = {
+    "BBC Article 1": "https://www.bbc.com/news/world-us-canada-66801985",
+    "BBC Article 2": "https://www.bbc.com/news/technology-66804779",
+    "BBC Article 3": "https://www.bbc.com/news/science-environment-66799975"
+}
+
+# Streamlit App Layout
+st.title("BBC News Article Analysis")
+st.write("""
+This app extracts BBC article text, generates a brief summary, and calculates an 
+importance score based on the article’s sentiment (positive/negative) using text mining algorithms.
+""")
+
+# Sidebar: Choose between preloaded articles or a custom URL
+analysis_mode = st.sidebar.radio("Select Analysis Mode", ["Preloaded Articles", "Custom URL"])
+
+if analysis_mode == "Preloaded Articles":
+    st.header("Preloaded BBC Articles Analysis")
+    results = []
+    for title, url in preloaded_articles.items():
+        st.subheader(title)
+        st.write(f"[Read the article]({url})")
+        summary, sentiment_label, importance_score = analyze_article(url)
+        if summary is None:
+            st.error("Failed to extract article text or article is too short for analysis.")
+            continue
+        st.write("**Summary:**", summary)
+        st.write("**Sentiment:**", sentiment_label)
+        st.write("**Importance Score:**", importance_score)
+        results.append({
+            "Title": title,
+            "URL": url,
+            "Summary": summary,
+            "Sentiment": sentiment_label,
+            "Importance Score": importance_score
+        })
+        st.markdown("---")
+    
+    if results:
+        st.subheader("Tabulated Results")
+        df = pd.DataFrame(results)
+        st.table(df)
+
+elif analysis_mode == "Custom URL":
+    st.header("Custom BBC Article Analysis")
+    custom_url = st.text_input("Enter the URL of a BBC article:")
+    if st.button("Generate Analysis") and custom_url:
+        summary, sentiment_label, importance_score = analyze_article(custom_url)
+        if summary is None:
+            st.error("Failed to extract article text or the article text is too short for analysis.")
+        else:
+            st.write("**Summary:**", summary)
+            st.write("**Sentiment:**", sentiment_label)
+            st.write("**Importance Score:**", importance_score)
+            st.success("Analysis complete!")
